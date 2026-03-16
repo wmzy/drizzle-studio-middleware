@@ -1,6 +1,6 @@
 import type { Proxy, ProxyParams, TransactionProxy } from './types'
 
-type ConnectionResult = {
+export type ConnectionResult = {
   packageName: string
   proxy: Proxy
   transactionProxy: TransactionProxy

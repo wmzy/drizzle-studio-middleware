@@ -49,6 +49,20 @@ type Relation = {
   refColumns: string[]
 }
 
+function getRefSchema(table: AnyTable<{}>): string | undefined {
+  if (is(table, PgTable)) return pgTableConfig(table).schema
+  if (is(table, MySqlTable)) return mysqlTableConfig(table).schema
+  if (is(table, SQLiteTable)) return undefined
+  if (is(table, SingleStoreTable)) return singlestoreTableConfig(table).schema
+  throw new Error('unsupported dialect')
+}
+
+function getRelationType(rel: unknown): 'one' | 'many' {
+  if (is(rel, One)) return 'one'
+  if (is(rel, Many)) return 'many'
+  throw new Error('unsupported relation type')
+}
+
 function extractRelations(
   tablesConfig: {
     tables: TablesRelationalConfig
@@ -56,99 +70,64 @@ function extractRelations(
   },
   casing?: CasingType,
 ): Relation[] {
-  return Object.values(tablesConfig.tables)
-    .map((it) =>
-      Object.entries(it.relations).map(([name, relation]) => {
-        try {
-          const normalized = normalizeRelation(
-            tablesConfig.tables,
-            tablesConfig.tableNamesMap,
-            relation,
-          )
-          const rel = relation
-          const refTable = rel.referencedTable
-          const fields = normalized.fields
-            .map((it) => getColumnCasing(it, casing))
-            .flat()
-          const refColumns = normalized.references
-            .map((it) => getColumnCasing(it, casing))
-            .flat()
+  return Object.values(tablesConfig.tables).flatMap((it) =>
+    Object.entries(it.relations).map(([name, relation]) => {
+      try {
+        const normalized = normalizeRelation(
+          tablesConfig.tables,
+          tablesConfig.tableNamesMap,
+          relation,
+        )
+        const fields = normalized.fields
+          .map((col) => getColumnCasing(col, casing))
+          .flat()
+        const refColumns = normalized.references
+          .map((col) => getColumnCasing(col, casing))
+          .flat()
 
-          let refSchema: string | undefined
-          if (is(refTable, PgTable)) {
-            refSchema = pgTableConfig(refTable).schema
-          } else if (is(refTable, MySqlTable)) {
-            refSchema = mysqlTableConfig(refTable).schema
-          } else if (is(refTable, SQLiteTable)) {
-            refSchema = undefined
-          } else if (is(refTable, SingleStoreTable)) {
-            refSchema = singlestoreTableConfig(refTable).schema
-          } else {
-            throw new Error('unsupported dialect')
-          }
-
-          let type: 'one' | 'many'
-          if (is(rel, One)) {
-            type = 'one'
-          } else if (is(rel, Many)) {
-            type = 'many'
-          } else {
-            throw new Error('unsupported relation type')
-          }
-
-          return {
-            name,
-            type,
-            table: it.dbName,
-            schema: it.schema || 'public',
-            columns: fields,
-            refTable: rel.referencedTableName,
-            refSchema: refSchema || 'public',
-            refColumns,
-          }
-        } catch (error) {
-          throw new Error(
-            `Invalid relation "${relation.fieldName}" for table "${it.schema ? `${it.schema}.${it.dbName}` : it.dbName}"`,
-          )
+        return {
+          name,
+          type: getRelationType(relation),
+          table: it.dbName,
+          schema: it.schema || 'public',
+          columns: fields,
+          refTable: relation.referencedTableName,
+          refSchema: getRefSchema(relation.referencedTable) || 'public',
+          refColumns,
         }
-      }),
-    )
-    .flat()
+      } catch (error) {
+        throw new Error(
+          `Invalid relation "${relation.fieldName}" for table "${it.schema ? `${it.schema}.${it.dbName}` : it.dbName}"`,
+        )
+      }
+    }),
+  )
+}
+
+function getTableConfig(table: AnyTable<{}>): { name: string; columns: AnyColumn[] } {
+  if (is(table, PgTable)) return pgTableConfig(table)
+  if (is(table, MySqlTable)) return mysqlTableConfig(table)
+  if (is(table, SQLiteTable)) return sqliteTableConfig(table)
+  return singlestoreTableConfig(table as SingleStoreTable)
 }
 
 export function getCustomDefaults<T extends AnyTable<{}>>(
   schema: Record<string, Record<string, T>>,
   casing?: CasingType,
 ): CustomDefault[] {
-  const customDefaults: CustomDefault[] = []
-
-  Object.entries(schema).map(([schemaName, tables]) => {
-    Object.entries(tables).map(([, table]) => {
-      let tableConfig: { name: string; columns: AnyColumn[] }
-      if (is(table, PgTable)) {
-        tableConfig = pgTableConfig(table)
-      } else if (is(table, MySqlTable)) {
-        tableConfig = mysqlTableConfig(table)
-      } else if (is(table, SQLiteTable)) {
-        tableConfig = sqliteTableConfig(table)
-      } else {
-        tableConfig = singlestoreTableConfig(table as SingleStoreTable)
-      }
-
-      tableConfig.columns.map((column) => {
-        if (column.defaultFn) {
-          customDefaults.push({
-            schema: schemaName,
-            table: tableConfig.name,
-            column: getColumnCasing(column, casing),
-            func: column.defaultFn,
-          })
-        }
-      })
-    })
-  })
-
-  return customDefaults
+  return Object.entries(schema).flatMap(([schemaName, tables]) =>
+    Object.values(tables).flatMap((table) => {
+      const config = getTableConfig(table)
+      return config.columns
+        .filter((column) => column.defaultFn)
+        .map((column) => ({
+          schema: schemaName,
+          table: config.name,
+          column: getColumnCasing(column, casing),
+          func: column.defaultFn!,
+        }))
+    }),
+  )
 }
 
 // --- Zod schemas for request validation ---

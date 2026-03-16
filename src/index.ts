@@ -1,8 +1,8 @@
 import { createHash } from 'crypto'
 import type { Hono } from 'hono'
 import { createStudioApp, getCustomDefaults } from './studio'
-import { createPostgresProxy, createMysqlProxy } from './connections'
-import type { Setup, StudioMiddlewareOptions, Proxy, TransactionProxy } from './types'
+import { createPostgresProxy, createMysqlProxy, type ConnectionResult } from './connections'
+import type { Setup, StudioMiddlewareOptions } from './types'
 
 export type { Setup, StudioMiddlewareOptions, ProxyParams, Proxy, TransactionProxy, CasingType, CustomDefault, SchemaFile } from './types'
 export { createStudioApp } from './studio'
@@ -12,44 +12,34 @@ export { createPostgresProxy, createMysqlProxy } from './connections'
  * High-level API: create a Studio Hono app from connection URL and schema.
  * Automatically detects installed database driver and creates proxy functions.
  */
-export async function createStudioMiddleware(options: StudioMiddlewareOptions): Promise<Hono> {
-  const { dialect, dbUrl, schema, relations = {}, casing, schemaFiles } = options
-
-  let proxy: Proxy
-  let transactionProxy: TransactionProxy
-  let packageName: string
-
-  if (dialect === 'postgresql') {
-    const conn = await createPostgresProxy(dbUrl)
-    proxy = conn.proxy
-    transactionProxy = conn.transactionProxy
-    packageName = conn.packageName
-  } else if (dialect === 'mysql') {
-    const conn = await createMysqlProxy(dbUrl)
-    proxy = conn.proxy
-    transactionProxy = conn.transactionProxy
-    packageName = conn.packageName
-  } else {
+async function createConnectionProxy(dialect: string, dbUrl: string) {
+  const creators: Record<string, (url: string) => Promise<ConnectionResult>> = {
+    postgresql: createPostgresProxy,
+    mysql: createMysqlProxy,
+  }
+  const create = creators[dialect]
+  if (!create) {
     throw new Error(`Dialect "${dialect}" is not yet supported by createStudioMiddleware. Use createStudioApp with a custom proxy instead.`)
   }
+  return create(dbUrl)
+}
 
-  const dbHash = createHash('sha256').update(dbUrl).digest('hex')
-  const customDefaults = getCustomDefaults(schema, casing)
+export async function createStudioMiddleware(options: StudioMiddlewareOptions): Promise<Hono> {
+  const { dialect, dbUrl, schema, relations = {}, casing, schemaFiles } = options
+  const { proxy, transactionProxy, packageName } = await createConnectionProxy(dialect, dbUrl)
 
-  const setup: Setup = {
-    dbHash,
+  return createStudioApp({
+    dbHash: createHash('sha256').update(dbUrl).digest('hex'),
     dialect,
     packageName,
     proxy,
     transactionProxy,
-    customDefaults,
+    customDefaults: getCustomDefaults(schema, casing),
     schema,
     relations,
     casing,
     schemaFiles,
-  }
-
-  return createStudioApp(setup)
+  })
 }
 
 /**
